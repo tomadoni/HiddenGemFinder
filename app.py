@@ -253,13 +253,15 @@ min_minutes = st.slider("Minimum Minutes", 0, int(df["min"].max()), 900, 100)
 max_age_default = int(df["age"].dropna().max()) if df["age"].notna().any() else 30
 max_age = st.slider("Max Age", 16, max(40, max_age_default), min(25, max_age_default))
 
-max_value = st.slider(
-    "Max Market Value (€)",
-    0,
-    int(df["market_value"].max()) if len(df) > 0 else 100000000,
-    min(int(df["market_value"].max()), 60000000) if len(df) > 0 else 60000000,
-    1000000,
+max_value_m = st.slider(
+    "Max Market Value (€M)",
+    min_value=0.0,
+    max_value=float(df["market_value"].max() / 1_000_000) if len(df) > 0 else 100.0,
+    value=min(float(df["market_value"].max() / 1_000_000), 60.0) if len(df) > 0 else 60.0,
+    step=1.0,
 )
+
+max_value = max_value_m * 1_000_000
 
 filtered = df[(df["min"] >= min_minutes) & (df["market_value"] <= max_value)].copy()
 
