@@ -1,5 +1,5 @@
-pandas==2.2.3
-scikit-learn==1.5.2
-plotly==5.24.1
-streamlit==1.39.0
-altair==5.5.0
+streamlit>=1.39
+pandas
+scikit-learn
+plotly
+altair<6
