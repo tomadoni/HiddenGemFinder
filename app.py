@@ -22,52 +22,99 @@ def normalize_name(value: str) -> str:
     return str(value).strip()
 
 
+def format_market_value(x):
+    if pd.isna(x):
+        return ""
+    try:
+        return f"€{int(round(float(x))):,}"
+    except Exception:
+        return str(x)
+
+
+def load_stats_file(path, league_name):
+    df = read_csv_safe(path, sep=";")
+    df.columns = (
+        df.columns.astype(str)
+        .str.replace('"', "", regex=False)
+        .str.replace("\ufeff", "", regex=False)
+        .str.strip()
+        .str.lower()
+    )
+
+    if "a" in df.columns:
+        df = df.rename(columns={"a": "assists"})
+
+    df["league"] = league_name
+    return df
+
+
+def load_info_file(path, league_name):
+    # These info files have the real header on row 2
+    df = read_csv_safe(path, header=1)
+    df.columns = (
+        df.columns.astype(str)
+        .str.replace('"', "", regex=False)
+        .str.replace("\ufeff", "", regex=False)
+        .str.strip()
+        .str.lower()
+    )
+
+    df = df.rename(columns={
+        "player": "player",
+        "squad": "team",
+        "pos": "position",
+        "nation": "nationality",
+        "age": "age",
+    })
+
+    if "age" in df.columns:
+        df["age"] = df["age"].astype(str).str.split("-").str[0]
+        df["age"] = pd.to_numeric(df["age"], errors="coerce")
+
+    df["league"] = league_name
+    return df
+
+
 @st.cache_data
 def load_data():
     # -----------------------------
     # LOAD STATS FILES
     # -----------------------------
-    pl_stats = read_csv_safe("league-players.csv", sep=";")
-    laliga_stats = read_csv_safe("league-players (1).csv", sep=";")
+    stats_files = [
+        ("league-players.csv", "Premier League"),
+        ("league-players (1).csv", "La Liga"),
+        ("bundesliga_xg_player.csv", "Bundesliga"),
+        ("seriea_xg_player.csv", "Serie A"),
+        ("ligue1_xg_player.csv", "Ligue 1"),
+    ]
 
-    for df in [pl_stats, laliga_stats]:
-        df.columns = (
-            df.columns.astype(str)
-            .str.replace('"', "", regex=False)
-            .str.replace("\ufeff", "", regex=False)
-            .str.strip()
-            .str.lower()
-        )
-        if "a" in df.columns:
-            df.rename(columns={"a": "assists"}, inplace=True)
+    stats_dfs = []
+    for path, league_name in stats_files:
+        stats_dfs.append(load_stats_file(path, league_name))
 
-    pl_stats["league"] = "Premier League"
-    laliga_stats["league"] = "La Liga"
-    stats = pd.concat([pl_stats, laliga_stats], ignore_index=True)
+    stats = pd.concat(stats_dfs, ignore_index=True)
 
     # -----------------------------
-    # LOAD PLAYER INFO FILES
-    # real header is row 2, so use header=1
+    # LOAD INFO FILES
     # -----------------------------
-    pl_info = read_csv_safe("premier_league_player_info.csv", header=1)
-    laliga_info = read_csv_safe("laliga_player_info.csv", header=1)
+    info_files = [
+        ("premier_league_player_info.csv", "Premier League"),
+        ("laliga_player_info.csv", "La Liga"),
+        ("bundesliga_player_info.csv", "Bundesliga"),
+        ("seriea_player_info.csv", "Serie A"),
+        ("ligue1_player_info.csv", "Ligue 1"),
+    ]
+
+    info_dfs = []
+    for path, league_name in info_files:
+        info_dfs.append(load_info_file(path, league_name))
+
+    player_info = pd.concat(info_dfs, ignore_index=True)
+
+    # -----------------------------
+    # LOAD TRANSFERMARKT FILE
+    # -----------------------------
     tm = read_csv_safe("transfermarkt_player_values.csv")
-
-    # Clean info headers
-    pl_info.columns = (
-        pl_info.columns.astype(str)
-        .str.replace('"', "", regex=False)
-        .str.replace("\ufeff", "", regex=False)
-        .str.strip()
-        .str.lower()
-    )
-    laliga_info.columns = (
-        laliga_info.columns.astype(str)
-        .str.replace('"', "", regex=False)
-        .str.replace("\ufeff", "", regex=False)
-        .str.strip()
-        .str.lower()
-    )
     tm.columns = (
         tm.columns.astype(str)
         .str.replace('"', "", regex=False)
@@ -76,32 +123,6 @@ def load_data():
         .str.lower()
     )
 
-    # Rename player info columns
-    pl_info = pl_info.rename(columns={
-        "player": "player",
-        "squad": "team",
-        "pos": "position",
-        "nation": "nationality",
-        "age": "age",
-    })
-    pl_info["league"] = "Premier League"
-
-    laliga_info = laliga_info.rename(columns={
-        "player": "player",
-        "squad": "team",
-        "pos": "position",
-        "nation": "nationality",
-        "age": "age",
-    })
-    laliga_info["league"] = "La Liga"
-
-    # age like 27-081 -> 27
-    for df in [pl_info, laliga_info]:
-        if "age" in df.columns:
-            df["age"] = df["age"].astype(str).str.split("-").str[0]
-            df["age"] = pd.to_numeric(df["age"], errors="coerce")
-
-    # Transfermarkt
     tm = tm.rename(columns={
         "name": "player",
         "league_name": "league",
@@ -109,8 +130,10 @@ def load_data():
         "age": "age_tm",
         "nationality": "nationality_tm",
     })
+
     keep_tm = [c for c in ["player", "league", "market_value", "age_tm", "nationality_tm"] if c in tm.columns]
     tm = tm[keep_tm].copy()
+
     if "market_value" in tm.columns:
         tm["market_value"] = pd.to_numeric(tm["market_value"], errors="coerce")
 
@@ -118,14 +141,11 @@ def load_data():
     # NORMALIZE NAMES
     # -----------------------------
     stats["player_merge"] = stats["player"].apply(normalize_name)
-    pl_info["player_merge"] = pl_info["player"].apply(normalize_name)
-    laliga_info["player_merge"] = laliga_info["player"].apply(normalize_name)
+    player_info["player_merge"] = player_info["player"].apply(normalize_name)
     tm["player_merge"] = tm["player"].apply(normalize_name)
 
-    player_info = pd.concat([pl_info, laliga_info], ignore_index=True)
-
     # -----------------------------
-    # MERGE
+    # MERGE STATS + INFO
     # -----------------------------
     df = stats.merge(
         player_info[["player_merge", "league", "team", "position", "nationality", "age"]],
@@ -137,6 +157,9 @@ def load_data():
     if "team_info" in df.columns:
         df["team"] = df["team_info"].fillna(df["team"])
 
+    # -----------------------------
+    # MERGE TRANSFERMARKT VALUES
+    # -----------------------------
     df = df.merge(
         tm[["player_merge", "league", "market_value"]],
         on=["player_merge", "league"],
@@ -157,7 +180,11 @@ def load_data():
     if "position" in df.columns:
         df = df[df["position"].astype(str).str.contains("FW|MF", na=False)].copy()
 
-    df["market_value"] = df["market_value"].fillna(df["market_value"].median())
+    # Fill missing market values with median so app doesn't break
+    if df["market_value"].notna().any():
+        df["market_value"] = df["market_value"].fillna(df["market_value"].median())
+    else:
+        df["market_value"] = 0
 
     # -----------------------------
     # FEATURES
@@ -170,6 +197,7 @@ def load_data():
     performance_features = ["xg90", "xa90", "g_a_per90", "goals_minus_xg", "assists_minus_xa"]
     scaler = StandardScaler()
     scaled = scaler.fit_transform(df[performance_features])
+
     scaled_df = pd.DataFrame(
         scaled,
         columns=[f"{c}_z" for c in performance_features],
@@ -215,20 +243,21 @@ def load_data():
 df = load_data()
 
 st.title("⚽ Multi-League Hidden Gem Finder")
-st.write("Find undervalued attacking players across the Premier League and La Liga.")
+st.write("Find undervalued attacking players across Europe’s top leagues.")
 
 league_options = ["All"] + sorted(df["league"].dropna().unique().tolist())
 selected_league = st.selectbox("League", league_options)
 
 min_minutes = st.slider("Minimum Minutes", 0, int(df["min"].max()), 900, 100)
+
 max_age_default = int(df["age"].dropna().max()) if df["age"].notna().any() else 30
 max_age = st.slider("Max Age", 16, max(40, max_age_default), min(25, max_age_default))
 
 max_value = st.slider(
     "Max Market Value (€)",
     0,
-    int(df["market_value"].max()),
-    min(int(df["market_value"].max()), 60000000),
+    int(df["market_value"].max()) if len(df) > 0 else 100000000,
+    min(int(df["market_value"].max()), 60000000) if len(df) > 0 else 60000000,
     1000000,
 )
 
@@ -241,13 +270,37 @@ if selected_league != "All":
     filtered = filtered[filtered["league"] == selected_league]
 
 st.subheader("Top Hidden Gems")
+
 show_cols = [
     "player", "team", "league", "position", "age", "market_value",
     "goals", "assists", "xg90", "xa90", "g_a_per90", "hidden_gem_score"
 ]
 existing_cols = [c for c in show_cols if c in filtered.columns]
-st.dataframe(filtered[existing_cols].head(25), use_container_width=True)
 
+display_df = filtered[existing_cols].head(25).copy()
+
+if "market_value" in display_df.columns:
+    display_df["market_value"] = display_df["market_value"].apply(format_market_value)
+
+if "xg90" in display_df.columns:
+    display_df["xg90"] = display_df["xg90"].round(2)
+
+if "xa90" in display_df.columns:
+    display_df["xa90"] = display_df["xa90"].round(2)
+
+if "g_a_per90" in display_df.columns:
+    display_df["g_a_per90"] = display_df["g_a_per90"].round(2)
+
+if "hidden_gem_score" in display_df.columns:
+    display_df["hidden_gem_score"] = display_df["hidden_gem_score"].round(1)
+
+st.dataframe(display_df, use_container_width=True)
+
+st.subheader("Top 15 Hidden Gem Scores")
+top15 = filtered.head(15).copy()
+top15["label"] = top15["player"] + " (" + top15["league"] + ")"
+top15 = top15.set_index("label")["hidden_gem_score"]
+st.bar_chart(top15)
 st.subheader("Top 15 Hidden Gem Scores")
 top15 = filtered.head(15).set_index("player")["hidden_gem_score"]
 st.bar_chart(top15)
