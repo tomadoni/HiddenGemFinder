@@ -5,6 +5,17 @@ from sklearn.preprocessing import StandardScaler, MinMaxScaler
 st.set_page_config(page_title="Hidden Gem Finder", layout="wide")
 
 
+def read_csv_safe(path, sep=","):
+    encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
+    last_error = None
+    for enc in encodings:
+        try:
+            return pd.read_csv(path, sep=sep, encoding=enc)
+        except Exception as e:
+            last_error = e
+    raise last_error
+
+
 def normalize_name(value: str) -> str:
     if pd.isna(value):
         return value
@@ -16,10 +27,9 @@ def load_data():
     # -----------------------------
     # LOAD STATS FILES
     # -----------------------------
-    pl_stats = pd.read_csv("league-players.csv", sep=";")
-    laliga_stats = pd.read_csv("league-players (1).csv", sep=";")
+    pl_stats = read_csv_safe("league-players.csv", sep=";")
+    laliga_stats = read_csv_safe("league-players (1).csv", sep=";")
 
-    # Standardize stat columns
     for df in [pl_stats, laliga_stats]:
         df.columns = (
             df.columns.astype(str)
@@ -33,17 +43,15 @@ def load_data():
 
     pl_stats["league"] = "Premier League"
     laliga_stats["league"] = "La Liga"
-
     stats = pd.concat([pl_stats, laliga_stats], ignore_index=True)
 
     # -----------------------------
     # LOAD PLAYER INFO FILES
     # -----------------------------
-    pl_info = pd.read_csv("premier_league_player_info.csv")
-    laliga_info = pd.read_csv("laliga_player_info.csv")
-    tm = pd.read_csv("transfermarkt_player_values.csv")
+    pl_info = read_csv_safe("premier_league_player_info.csv")
+    laliga_info = read_csv_safe("laliga_player_info.csv")
+    tm = read_csv_safe("transfermarkt_player_values.csv")
 
-    # PL info
     pl_info.columns = (
         pl_info.columns.astype(str)
         .str.replace('"', "", regex=False)
@@ -60,7 +68,6 @@ def load_data():
     })
     pl_info["league"] = "Premier League"
 
-    # La Liga info
     laliga_info.columns = (
         laliga_info.columns.astype(str)
         .str.replace('"', "", regex=False)
@@ -74,13 +81,11 @@ def load_data():
         "nation": "nationality",
         "age": "age",
     })
-    # age like 27-081 -> 27
     if "age" in laliga_info.columns:
         laliga_info["age"] = laliga_info["age"].astype(str).str.split("-").str[0]
     laliga_info["age"] = pd.to_numeric(laliga_info["age"], errors="coerce")
     laliga_info["league"] = "La Liga"
 
-    # Transfermarkt
     tm.columns = (
         tm.columns.astype(str)
         .str.replace('"', "", regex=False)
@@ -96,7 +101,6 @@ def load_data():
         "nationality": "nationality_tm",
     })
 
-    # Keep only needed columns if they exist
     keep_tm = [c for c in ["player", "league", "market_value", "age_tm", "nationality_tm"] if c in tm.columns]
     tm = tm[keep_tm].copy()
     if "market_value" in tm.columns:
@@ -139,17 +143,12 @@ def load_data():
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Drop rows missing core stat fields
     df = df.dropna(subset=["player", "team", "apps", "min", "goals", "assists", "xg", "xa", "xg90", "xa90"]).copy()
-
-    # Minutes filter
     df = df[df["min"] >= 900].copy()
 
-    # Position filter
     if "position" in df.columns:
         df = df[df["position"].astype(str).str.contains("FW|MF", na=False)].copy()
 
-    # Fill market value missing with median so app still works
     df["market_value"] = df["market_value"].fillna(df["market_value"].median())
 
     # -----------------------------
@@ -160,7 +159,6 @@ def load_data():
     df["goals_minus_xg"] = df["goals"] - df["xg"]
     df["assists_minus_xa"] = df["assists"] - df["xa"]
 
-    # Performance score
     performance_features = ["xg90", "xa90", "g_a_per90", "goals_minus_xg", "assists_minus_xa"]
     scaler = StandardScaler()
     scaled = scaler.fit_transform(df[performance_features])
@@ -181,7 +179,6 @@ def load_data():
 
     df["performance_score_100"] = MinMaxScaler(feature_range=(0, 100)).fit_transform(df[["performance_score"]])
 
-    # Age bonus
     if df["age"].notna().any():
         age_nonnull = df["age"].fillna(df["age"].median())
         df["age_scaled"] = MinMaxScaler().fit_transform(age_nonnull.to_frame())
@@ -189,13 +186,10 @@ def load_data():
     else:
         df["age_bonus"] = 0.5
 
-    # Value bonus
     df["value_scaled"] = MinMaxScaler().fit_transform(df[["market_value"]])
     df["value_bonus"] = 1 - df["value_scaled"]
 
-    # Final hidden gem score
-    perf_scaled = MinMaxScaler().fit_transform(df[["performance_score"]])
-    df["performance_scaled"] = perf_scaled
+    df["performance_scaled"] = MinMaxScaler().fit_transform(df[["performance_score"]])
 
     df["hidden_gem_score_raw"] = (
         0.70 * df["performance_scaled"]
@@ -218,34 +212,19 @@ st.write("Find undervalued attacking players across the Premier League and La Li
 league_options = ["All"] + sorted(df["league"].dropna().unique().tolist())
 selected_league = st.selectbox("League", league_options)
 
-min_minutes = st.slider(
-    "Minimum Minutes",
-    min_value=0,
-    max_value=int(df["min"].max()),
-    value=900,
-    step=100,
-)
-
+min_minutes = st.slider("Minimum Minutes", 0, int(df["min"].max()), 900, 100)
 max_age_default = int(df["age"].dropna().max()) if df["age"].notna().any() else 30
-max_age = st.slider(
-    "Max Age",
-    min_value=16,
-    max_value=max(40, max_age_default),
-    value=min(25, max_age_default),
-)
+max_age = st.slider("Max Age", 16, max(40, max_age_default), min(25, max_age_default))
 
 max_value = st.slider(
     "Max Market Value (€)",
-    min_value=0,
-    max_value=int(df["market_value"].max()),
-    value=min(int(df["market_value"].max()), 60000000),
-    step=1000000,
+    0,
+    int(df["market_value"].max()),
+    min(int(df["market_value"].max()), 60000000),
+    1000000,
 )
 
-filtered = df[
-    (df["min"] >= min_minutes) &
-    (df["market_value"] <= max_value)
-].copy()
+filtered = df[(df["min"] >= min_minutes) & (df["market_value"] <= max_value)].copy()
 
 if "age" in filtered.columns and filtered["age"].notna().any():
     filtered = filtered[filtered["age"].fillna(99) <= max_age]
