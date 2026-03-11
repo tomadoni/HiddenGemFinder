@@ -5,12 +5,12 @@ from sklearn.preprocessing import StandardScaler, MinMaxScaler
 st.set_page_config(page_title="Hidden Gem Finder", layout="wide")
 
 
-def read_csv_safe(path, sep=","):
+def read_csv_safe(path, sep=",", header="infer"):
     encodings = ["utf-8", "utf-8-sig", "latin1", "cp1252"]
     last_error = None
     for enc in encodings:
         try:
-            return pd.read_csv(path, sep=sep, encoding=enc)
+            return pd.read_csv(path, sep=sep, encoding=enc, header=header)
         except Exception as e:
             last_error = e
     raise last_error
@@ -47,11 +47,13 @@ def load_data():
 
     # -----------------------------
     # LOAD PLAYER INFO FILES
+    # real header is row 2, so use header=1
     # -----------------------------
-    pl_info = read_csv_safe("premier_league_player_info.csv")
-    laliga_info = read_csv_safe("laliga_player_info.csv")
+    pl_info = read_csv_safe("premier_league_player_info.csv", header=1)
+    laliga_info = read_csv_safe("laliga_player_info.csv", header=1)
     tm = read_csv_safe("transfermarkt_player_values.csv")
 
+    # Clean info headers
     pl_info.columns = (
         pl_info.columns.astype(str)
         .str.replace('"', "", regex=False)
@@ -59,15 +61,6 @@ def load_data():
         .str.strip()
         .str.lower()
     )
-    pl_info = pl_info.rename(columns={
-        "player name": "player",
-        "club": "team",
-        "position": "position",
-        "age": "age",
-        "nationality": "nationality",
-    })
-    pl_info["league"] = "Premier League"
-
     laliga_info.columns = (
         laliga_info.columns.astype(str)
         .str.replace('"', "", regex=False)
@@ -75,17 +68,6 @@ def load_data():
         .str.strip()
         .str.lower()
     )
-    laliga_info = laliga_info.rename(columns={
-        "squad": "team",
-        "pos": "position",
-        "nation": "nationality",
-        "age": "age",
-    })
-    if "age" in laliga_info.columns:
-        laliga_info["age"] = laliga_info["age"].astype(str).str.split("-").str[0]
-    laliga_info["age"] = pd.to_numeric(laliga_info["age"], errors="coerce")
-    laliga_info["league"] = "La Liga"
-
     tm.columns = (
         tm.columns.astype(str)
         .str.replace('"', "", regex=False)
@@ -93,6 +75,33 @@ def load_data():
         .str.strip()
         .str.lower()
     )
+
+    # Rename player info columns
+    pl_info = pl_info.rename(columns={
+        "player": "player",
+        "squad": "team",
+        "pos": "position",
+        "nation": "nationality",
+        "age": "age",
+    })
+    pl_info["league"] = "Premier League"
+
+    laliga_info = laliga_info.rename(columns={
+        "player": "player",
+        "squad": "team",
+        "pos": "position",
+        "nation": "nationality",
+        "age": "age",
+    })
+    laliga_info["league"] = "La Liga"
+
+    # age like 27-081 -> 27
+    for df in [pl_info, laliga_info]:
+        if "age" in df.columns:
+            df["age"] = df["age"].astype(str).str.split("-").str[0]
+            df["age"] = pd.to_numeric(df["age"], errors="coerce")
+
+    # Transfermarkt
     tm = tm.rename(columns={
         "name": "player",
         "league_name": "league",
@@ -100,7 +109,6 @@ def load_data():
         "age": "age_tm",
         "nationality": "nationality_tm",
     })
-
     keep_tm = [c for c in ["player", "league", "market_value", "age_tm", "nationality_tm"] if c in tm.columns]
     tm = tm[keep_tm].copy()
     if "market_value" in tm.columns:
