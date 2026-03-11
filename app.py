@@ -299,10 +299,18 @@ if "hidden_gem_score" in display_df.columns:
 st.dataframe(display_df, use_container_width=True)
 
 st.subheader("Top 15 Hidden Gem Scores")
+
 top15 = filtered.head(15).copy()
 top15["label"] = top15["player"] + " (" + top15["league"] + ")"
-top15 = top15.set_index("label")["hidden_gem_score"]
-st.bar_chart(top15)
-st.subheader("Top 15 Hidden Gem Scores")
-top15 = filtered.head(15).set_index("player")["hidden_gem_score"]
-st.bar_chart(top15)
+top15["hidden_gem_score"] = top15["hidden_gem_score"].round(1)
+
+fig = px.bar(
+    top15,
+    x="hidden_gem_score",
+    y="label",
+    orientation="h",
+    title="Top 15 Hidden Gem Scores"
+)
+
+fig.update_layout(yaxis={"categoryorder": "total ascending"})
+st.plotly_chart(fig, use_container_width=True)
