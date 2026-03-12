@@ -48,20 +48,45 @@ def fbref_search_link(player_name):
     return f"https://fbref.com/en/search/search.fcgi?search={query}"
 
 
-def assign_role(position):
+def assign_role(position, goals_per90=None, assists_per90=None, xg90=None, xa90=None):
     if pd.isna(position):
         return "Other"
 
     pos = str(position).upper().strip()
 
-    if "FW" in pos and "MF" not in pos:
+    # Strong exclusions first
+    defensive_tags = ["DF", "CB", "LB", "RB", "LWB", "RWB", "WB", "DM"]
+    if any(tag in pos for tag in defensive_tags):
+        return "Other"
+
+    # Clear striker
+    if pos == "FW":
         return "Striker"
 
-    if "FW,MF" in pos or "MF,FW" in pos:
+    # Wide roles
+    wide_tags = ["LW", "RW", "LM", "RM"]
+    if any(tag in pos for tag in wide_tags):
         return "Winger"
 
-    if pos == "MF":
+    # Hybrid forward/midfielder
+    if "FW,MF" in pos or "MF,FW" in pos:
+        goal_signal = 0 if pd.isna(goals_per90) else goals_per90
+        assist_signal = 0 if pd.isna(assists_per90) else assists_per90
+        xg_signal = 0 if pd.isna(xg90) else xg90
+        xa_signal = 0 if pd.isna(xa90) else xa90
+
+        # scorer-heavy hybrid = striker
+        if (goal_signal >= 0.40 and assist_signal <= 0.15) or (xg_signal > xa_signal * 1.5):
+            return "Striker"
+        return "Winger"
+
+    # True attacking mids only
+    if pos in ["MF", "AM", "CAM"]:
         return "Attacking Mid"
+
+    # Central mids are not automatically attacking mids
+    if pos in ["CM", "CM,MF", "MF,CM"]:
+        return "Other"
 
     return "Other"
 
@@ -192,9 +217,6 @@ def load_data():
     df = df.dropna(subset=["player", "team", "apps", "min", "goals", "assists", "xg", "xa", "xg90", "xa90"]).copy()
     df = df[df["min"] >= 900].copy()
 
-    if "position" in df.columns:
-        df = df[df["position"].astype(str).str.contains("FW|MF", na=False)].copy()
-
     if df["market_value"].notna().any():
         df["market_value"] = df["market_value"].fillna(df["market_value"].median())
     else:
@@ -205,6 +227,23 @@ def load_data():
     df["g_a_per90"] = df["g_a"] / (df["min"] / 90)
     df["goals_minus_xg"] = df["goals"] - df["xg"]
     df["assists_minus_xa"] = df["assists"] - df["xa"]
+    df["goals_per90"] = df["goals"] / (df["min"] / 90)
+    df["assists_per90"] = df["assists"] / (df["min"] / 90)
+
+    # Assign roles using smarter logic
+    df["role"] = df.apply(
+        lambda row: assign_role(
+            row["position"],
+            goals_per90=row["goals_per90"] if row["min"] > 0 else 0,
+            assists_per90=row["assists_per90"] if row["min"] > 0 else 0,
+            xg90=row["xg90"],
+            xa90=row["xa90"],
+        ),
+        axis=1,
+    )
+
+    # Keep only usable attacking roles
+    df = df[df["role"].isin(["Striker", "Winger", "Attacking Mid"])].copy()
 
     # Base z-scored performance features
     performance_features = ["xg90", "xa90", "g_a_per90", "goals_minus_xg", "assists_minus_xa"]
@@ -227,28 +266,25 @@ def load_data():
     )
     df["performance_score_100"] = MinMaxScaler(feature_range=(0, 100)).fit_transform(df[["performance_score"]])
 
-    # Roles
-    df["role"] = df["position"].apply(assign_role)
-
     # Role-specific raw scoring
     df["striker_score_raw"] = (
-        0.40 * df["xg90"]
+        0.45 * df["xg90"]
         + 0.25 * df["g_a_per90"]
         + 0.20 * df["goals_minus_xg"]
-        + 0.15 * df["goals"]
+        + 0.10 * df["goals_per90"]
     )
 
     df["winger_score_raw"] = (
         0.30 * df["xa90"]
         + 0.25 * df["g_a_per90"]
-        + 0.20 * df["assists"]
+        + 0.15 * df["assists_per90"]
         + 0.15 * df["xg90"]
-        + 0.10 * df["assists_minus_xa"]
+        + 0.15 * df["assists_minus_xa"]
     )
 
     df["att_mid_score_raw"] = (
         0.35 * df["xa90"]
-        + 0.25 * df["assists"]
+        + 0.25 * df["assists_per90"]
         + 0.20 * df["g_a_per90"]
         + 0.10 * df["xg90"]
         + 0.10 * df["assists_minus_xa"]
@@ -288,22 +324,24 @@ def load_data():
     df["value_bonus"] = 1 - df["value_scaled"]
 
     # Development / upside model
-    # Peaks around young productive players
     df["age_for_upside"] = df["age"].fillna(df["age"].median())
     df["development_upside_raw"] = ((24 - df["age_for_upside"]).clip(lower=0) / 6) * df["performance_score_100"]
     df["development_upside_score"] = MinMaxScaler(feature_range=(0, 100)).fit_transform(
         df[["development_upside_raw"]]
     )
 
+    # Minutes reliability
+    df["minutes_factor"] = (df["min"] / 1800).clip(lower=0.5, upper=1.0)
+
     # Final hidden gem score
     df["role_score_scaled"] = MinMaxScaler().fit_transform(df[["adjusted_role_score_raw"]])
 
     df["hidden_gem_score_raw"] = (
-        0.60 * df["role_score_scaled"]
-        + 0.20 * df["value_bonus"]
-        + 0.10 * df["age_bonus"]
-        + 0.10 * (df["development_upside_score"] / 100)
-    )
+        0.75 * df["role_score_scaled"]
+        + 0.15 * df["value_bonus"]
+        + 0.05 * df["age_bonus"]
+        + 0.05 * (df["development_upside_score"] / 100)
+    ) * df["minutes_factor"]
 
     max_score = df["hidden_gem_score_raw"].max()
     if max_score == 0:
@@ -496,8 +534,8 @@ if len(filtered) > 0:
         sim_matrix = scaler.fit_transform(sim_df[similarity_features])
         similarity = cosine_similarity(sim_matrix)
 
-        sim_index = sim_df.index[sim_df["player"] == player_choice][0]
-        matrix_row = sim_df.index.get_loc(sim_index)
+        player_idx = sim_df.index[sim_df["player"] == player_choice][0]
+        matrix_row = sim_df.index.get_loc(player_idx)
 
         sim_scores = similarity[matrix_row]
         sim_df = sim_df.copy()
@@ -571,7 +609,11 @@ if len(filtered) > 1:
 st.subheader("Scouting Links")
 
 if len(filtered) > 0:
-    scouting_player = st.selectbox("Choose a player for scouting links", filtered["player"].dropna().unique().tolist(), key="scouting_links")
+    scouting_player = st.selectbox(
+        "Choose a player for scouting links",
+        filtered["player"].dropna().unique().tolist(),
+        key="scouting_links",
+    )
     st.markdown(f"[YouTube Highlights]({youtube_search_link(scouting_player)})")
     st.markdown(f"[FBref Search]({fbref_search_link(scouting_player)})")
 
@@ -581,7 +623,19 @@ if len(filtered) > 0:
 st.subheader("Recruitment Target List Export")
 
 target_df = filtered[
-    ["player", "team", "league", "role", "age", "market_value", "xg90", "xa90", "g_a_per90", "hidden_gem_score", "development_upside_score"]
+    [
+        "player",
+        "team",
+        "league",
+        "role",
+        "age",
+        "market_value",
+        "xg90",
+        "xa90",
+        "g_a_per90",
+        "hidden_gem_score",
+        "development_upside_score",
+    ]
 ].head(20).copy()
 
 target_df["market_value"] = target_df["market_value"].apply(format_market_value)
@@ -592,3 +646,58 @@ target_df["hidden_gem_score"] = target_df["hidden_gem_score"].round(1)
 target_df["development_upside_score"] = target_df["development_upside_score"].round(1)
 
 st.dataframe(target_df, use_container_width=True)
+
+# =====================================================
+# EXPORT BUTTON
+# =====================================================
+
+st.subheader("Export Data")
+
+export_df = filtered[
+    [
+        "player",
+        "team",
+        "league",
+        "role",
+        "age",
+        "market_value",
+        "goals",
+        "assists",
+        "xg90",
+        "xa90",
+        "g_a_per90",
+        "hidden_gem_score",
+        "development_upside_score",
+    ]
+].copy()
+
+csv = export_df.to_csv(index=False).encode("utf-8")
+
+st.download_button(
+    label="Download Player List (CSV)",
+    data=csv,
+    file_name="hidden_gem_targets.csv",
+    mime="text/csv",
+)
+
+# =====================================================
+# FOOTER
+# =====================================================
+
+st.markdown("---")
+
+st.caption(
+"""
+Hidden Gem Finder – built for identifying undervalued attacking players across Europe's top leagues.
+
+Model incorporates:
+• xG and xA production  
+• Goals & assists per 90  
+• Overperformance vs expected metrics  
+• Age-based development upside  
+• Market value inefficiency  
+• League strength adjustments  
+
+Designed for scouting workflows and recruitment target identification.
+"""
+)
